@@ -1,0 +1,24 @@
+<launch>
+
+  <!-- Load the navigation stack -->
+  <include file="$(find brick_search)/launch/navigation.launch" />
+  
+  <!-- Start the gmapping node -->
+  <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
+        <!-- Configure any gmapping parameters here -->
+  </node>
+
+  <!-- Start the explore_lite node -->
+  <node pkg="explore_lite" type="explore" name="explore" output="screen">
+    <remap from="map" to="/map"/>
+    <remap from="cmd_vel" to="/cmd_vel"/>
+    <remap from="costmap" to="/move_base/global_costmap/costmap"/>
+    <param name="robot_base_frame" value="base_link"/>
+    <param name="visualize" value="true"/>
+    <param name="min_frontier_size" value="0.4"/>
+
+
+  </node>
+
+</launch>
+
