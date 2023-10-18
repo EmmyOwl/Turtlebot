@@ -12,8 +12,6 @@ Panels:
         - /Local Map1/Polygon1
         - /Local Map1/Costmap1
         - /Local Map1/Planner1
-        - /MarkerArray1
-        - /MarkerArray1/Status1
       Splitter Ratio: 0.5
     Tree Height: 652
   - Class: rviz/Selection
@@ -341,14 +339,6 @@ Visualization Manager:
       Shape: Arrow
       Topic: /move_base_simple/goal
       Unreliable: false
-      Value: true
-    - Class: rviz/MarkerArray
-      Enabled: true
-      Marker Topic: /explore/frontiers
-      Name: MarkerArray
-      Namespaces:
-        frontiers: true
-      Queue Size: 100
       Value: true
   Enabled: true
   Global Options:
