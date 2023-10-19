@@ -147,6 +147,28 @@ class BrickSearch:
         # Copy the image message to a cv_bridge image
         image = self.cv_bridge_.imgmsg_to_cv2(image_msg)
 
+        # Convert to RGB format
+        image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+
+        # Reduce image height to 2%
+        height, width, _ = image.shape
+
+        top = int(height*0.49)
+        bottom = int(height*0.51)
+
+        image = image[top:bottom, :] # Slice image
+
+        # Specify 'Red' Colour Range
+        lower_range_red = np.array([0, 0, 100], dtype=np.uint8)
+        upper_range_red = np.array([40, 40, 255], dtype=np.uint8)
+
+        # Create a bit mask that specifies pixels in the correct colour range
+        bit_mask = cv.inRange(image, lower_range_red, upper_range_red)
+
+        red_present = cv.countNonZero(bit_mask) > 1
+
+        self.brick_found_ = red_present
+        
         # You can set "brick_found_" to true to signal to "mainLoop" that you have found a brick
         # You may want to communicate more information
         # Since the "image_callback" and "main_loop" methods can run at the same time you should protect any shared variables
