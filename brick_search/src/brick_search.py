@@ -165,7 +165,7 @@ class BrickSearch:
         # Create a bit mask that specifies pixels in the correct colour range
         bit_mask = cv.inRange(image, lower_range_red, upper_range_red)
 
-        red_present = cv.countNonZero(bit_mask) > 1
+        red_present = cv.countNonZero(bit_mask) > 0
 
         self.brick_found_ = red_present
         
