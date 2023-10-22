@@ -1,0 +1,22 @@
+<launch>
+
+    <!-- 1. Start the AMCL for Localization -->
+    <include file="$(find brick_search)/launch/amcl.launch"/>
+
+    <!-- 2. Start the move_base for Navigation -->
+    <include file="$(find brick_search)/launch/move_base.launch"/>
+
+    <!-- 3. Run your brick_search.py node -->
+    <node name="brick_search_node" pkg="brick_search" type="brick_search.py" output="screen"/>
+    
+    <node name="map_server" pkg="map_server" type="map_server" respawn="false" args="/home/emmy/catkin_ws/src/brick_search/config/explore_map.yaml"/>
+
+    <!-- rviz -->
+    <arg name="open_rviz" default="true"/>
+    <group if="$(arg open_rviz)"> 
+    <node pkg="rviz" type="rviz" name="rviz" required="true"
+          args="-d $(find brick_search)/rviz/navigation.rviz"/>
+    </group>
+
+</launch>
+

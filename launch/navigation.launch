@@ -15,8 +15,7 @@
    <!-- Map server -->
    <node pkg="map_server" name="map_server" type="map_server" args="$(arg map_file)"/>
 
-    <!-- AMCL from your custom launch -->
-    <include file="$(find brick_search)/launch/amcl.launch"/>
+
 
     <!-- Launch move_base -->
     <include file="$(find brick_search)/launch/move_base.launch">
