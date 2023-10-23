@@ -60,7 +60,7 @@ class BrickSearch:
         self.cam_fov = 100.0
         self.brick_cells_ = [False] * int(self.cam_fov)
         self.brick_coords_ = []
-        self.brick_coord_radius_ = 0.1
+        self.brick_coord_radius_ = 0.01
 
         # Get the map via a ROS service call
         rospy.loginfo("Waiting for static_map service...")
@@ -87,7 +87,7 @@ class BrickSearch:
 
         self.tf_listener_cam_ = tf.TransformListener()
 
-        while not rospy.is_shutdown() and not self.tf_listener_cam_.canTransform("map", "camera_rgb_optical_frame", rospy.Time(0.)):
+        while not rospy.is_shutdown() and not self.tf_listener_cam_.canTransform("map", "camera_link", rospy.Time(0.)):
             rospy.sleep(0.1)
 
         # Subscribe to the LiDAR measurements
@@ -146,7 +146,7 @@ class BrickSearch:
     def get_pose_2d_cam(self):
 
         # Lookup the latest transform
-        (trans,rot) = self.tf_listener_.lookupTransform('map', 'camera_rgb_optical_frame', rospy.Time(0))
+        (trans,rot) = self.tf_listener_.lookupTransform('map', 'camera_link', rospy.Time(0))
 
         print(trans)
         print(rot)
@@ -380,8 +380,8 @@ class BrickSearch:
         angle = wrap_angle(pose.theta + math.radians(self.cam_fov/2.0) - math.radians(index))
         print(pose.theta)
         print(angle)
-        x = pose.x + dist*math.sin(angle)
-        y = pose.y + dist*math.cos(angle)
+        x = pose.x + dist*math.cos(angle)
+        y = pose.y + dist*math.sin(angle)
 
         return (x, y)
     
