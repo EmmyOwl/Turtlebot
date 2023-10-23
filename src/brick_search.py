@@ -25,7 +25,9 @@ from threading import Lock
 from visualization_msgs.msg import Marker
 from sensor_msgs.msg import LaserScan
 import os
-
+import tf2_ros
+import tf2_geometry_msgs
+from geometry_msgs.msg import PointStamped
 
 
 
@@ -53,9 +55,15 @@ def pose2d_to_pose(pose_2d):
 class BrickSearch:
     def __init__(self):
         # Variables/Flags
-        self.localised_ = False  # You'll handle this logic yourself
+        self.localised_ = False
         self.brick_found_ = False
         self.image_msg_count_ = 0
+        self.lidar_callback_ready_ = 0
+        self.lidar_lock_ = Lock()
+        self.cam_fov = 100.0
+        self.brick_cells_ = [False] * int(self.cam_fov)
+        self.brick_coords_ = []
+        self.brick_coord_radius_ = 0.01
 
         # Convert map into a CV image
         self.cv_bridge_ = CvBridge()
@@ -71,8 +79,17 @@ class BrickSearch:
         while not rospy.is_shutdown() and not self.tf_listener_.canTransform("map", "base_link", rospy.Time(0.)):
             rospy.sleep(0.1)
 
+        # Subscribe to the LiDAR measurements
+        #self.lidar_sub_ = rospy.Subscriber("/scan", LaserScan, self.lidar_callback, queue_size=1)
+
+        # Advertise brick markers to RViZ
+        self.marker_pub = rospy.Publisher("visualization_marker", Marker, queue_size=1)
+
+        # Subscribe to depth camera
+        self.depth_sub_ = rospy.Subscriber("/camera/depth/image_raw", Image, self.depth_callback, queue_size=1)
+
         # Subscribe to the camera
-        self.image_sub_ = rospy.Subscriber("/camera/rgb/image_raw", Image, self.image_callback, queue_size=1)
+        self.image_sub_ = rospy.Subscriber("/camera/rgb/image_raw", Image, self.image_callback, callback_args='image_msg', queue_size=1)
 
         # Advertise "cmd_vel" publisher to control TurtleBot manually
         self.cmd_vel_pub_ = rospy.Publisher('cmd_vel', Twist, queue_size=1)
@@ -82,8 +99,7 @@ class BrickSearch:
         rospy.loginfo("Waiting for move_base action...")
         self.move_base_action_client_.wait_for_server()
         rospy.loginfo("move_base action available")
-
-        self.marker_pub_ = rospy.Publisher('brick_marker', Marker, queue_size=10)
+        #self.marker_pub_ = rospy.Publisher('brick_marker', Marker, queue_size=10)
 
         self.laser_sub_ = rospy.Subscriber("/scan", LaserScan, self.laser_callback, queue_size=1)
         self.latest_scan_ = None
@@ -118,10 +134,8 @@ class BrickSearch:
             return None
 
 
-    def image_callback(self, image_msg):
+    def image_callback(self, image_msg, depth_msg):
         # Use this method to identify when the brick is visible
-
-        print("start image_callback")
 
         # The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
         if self.image_msg_count_ < 15:
@@ -129,6 +143,10 @@ class BrickSearch:
             return
         else:
             self.image_msg_count_ = 0
+
+            if self.brick_found_:
+                with self.lidar_lock_:
+                    self.lidar_callback_ready_ = 1
 
         # Copy the image message to a cv_bridge image
         image = self.cv_bridge_.imgmsg_to_cv2(image_msg)
@@ -154,60 +172,317 @@ class BrickSearch:
         red_present = cv.countNonZero(bit_mask) > 0
 
         self.brick_found_ = red_present
-        
+
+        if not self.brick_found_:
+            self.brick_cells_ = [False] * int(self.cam_fov)
+
+        with self.lidar_lock_:
+            for index in range(int(self.cam_fov)):
+                # Divide the image into 100 segments (one segment per one degree of FOV)
+                left = index*int(width*(1.0/self.cam_fov))
+                right = (index + 1)*int(width*(1.0/self.cam_fov))
+                segment = image[ : , left : right]
+
+                # Designate if red range is in the segment and assign answer to list
+                has_brick = cv.countNonZero(cv.inRange(segment, lower_range_red, upper_range_red)) > 0
+
+                # Assign condition
+                self.brick_cells_[index] = has_brick
+            
+            # Remove potentially partially filled segments (first and last)
+            # e.g., some brick is captured some environment is also captured.
+            # This ensures LiDAR measurement touches the brick and not the environment.
+            
+            try:
+                # Clear first and last FOV elements where brick is visible
+                # (Must be visible across three degrees to yield a result)
+                for _ in range(2):
+                    self.brick_cells_[self.brick_cells_.index(True)] = False
+                    self.brick_cells_.reverse()
+            except ValueError:
+                self.brick_cells_ = [False] * int(self.cam_fov)
+
         # You can set "brick_found_" to true to signal to "mainLoop" that you have found a brick
         # You may want to communicate more information
         # Since the "image_callback" and "main_loop" methods can run at the same time you should protect any shared variables
         # with a mutex
         # "brick_found_" doesn't need a mutex because it's an atomic
 
+
+
+
         rospy.loginfo('image_callback')
         rospy.loginfo('brick_found_: ' + str(self.brick_found_))
 
-        if self.brick_found_:
-            distance_to_brick = self.get_distance_in_front()
-            if distance_to_brick is not None:
-                # Get the robot's current pose
-                pose_2d = self.get_pose_2d()
+    def depth_callback(self, depth_msg):
+        if not self.brick_found_:
+            return
+        # Synchronise lidar callback with image callback
+        with self.lidar_lock_:
+            if self.lidar_callback_ready_:
+                self.lidar_callback_ready_ = 0
+                
+                # if brick is not seen end the method early
+                brick_seen = False
+                for index in range(len(self.brick_cells_)):
+                    if self.brick_cells_[index]:
+                        brick_seen = True
+                        break
+                if not brick_seen:
+                    return
 
-                # Calculate the position of the brick relative to the robot's current position
-                brick_position = Pose2D()
-                brick_position.x = pose_2d.x + distance_to_brick * math.cos(pose_2d.theta)
-                brick_position.y = pose_2d.y + distance_to_brick * math.sin(pose_2d.theta)
-                brick_position.theta = pose_2d.theta
+                # Make local copy of brick_cells
+                brick_cells_ = self.brick_cells_
+            else:
+                return
 
-                # Create a marker for the brick's position
-                marker = Marker()
-                marker.header.frame_id = "map"
-                marker.header.stamp = rospy.Time.now()
-                marker.ns = "brick_marker"
-                marker.id = 0
-                marker.type = Marker.CUBE
-                marker.action = Marker.ADD
+        rospy.loginfo("depth_callback")
 
-                marker.pose.position.x = brick_position.x
-                marker.pose.position.y = brick_position.y - 0.065
-                marker.pose.position.z = 0.094
-                marker.pose.orientation.x = 0.0
-                marker.pose.orientation.y = 0.0
-                marker.pose.orientation.z = 0.0
-                marker.pose.orientation.w = 1.0
+        depth = self.cv_bridge_.imgmsg_to_cv2(depth_msg)
+        # Get cam distances
+        height, width = depth.shape
+        depth = depth[int(height*0.5):int(height*0.5)+1, : ] # Slice depth image to single list
+        depth = depth[0]
 
-                marker.scale.x = 0.3  
-                marker.scale.y = 0.3
-                marker.scale.z = 0.2
-                marker.color.a = 1.0
-                marker.color.r = 1.0
-                marker.color.g = 0.0
-                marker.color.b = 0.0
+        valid_distances = []
 
-                # Publish the marker
-                self.marker_pub_.publish(marker)
+        quotient = int(width/self.cam_fov)
+        for index in range(int(self.cam_fov)):
+            if brick_cells_[index]:
+                if depth[quotient*index] is np.nan:
+                    rospy.loginfo("Wally is too close!")
+                    return
+                valid_distances.append((index, depth[quotient*index]))
+        
+        if len(valid_distances) == 0:
+            return
+        
+        cam_pose = self.get_pose_2d_cam()
 
-                rospy.loginfo('Brick Marker Set')
+        coordinates = []
 
-            self.send_goal_to_brick(brick_position)
-            rospy.loginfo('Goal towards brick sent')
+        for index in range(len(valid_distances)):
+            coordinates.append(self.get_lidar_coordinate(cam_pose, valid_distances[index][0], valid_distances[index][1]))
+        print(coordinates)
+
+        self.publish_brick_marker(coordinates)
+
+
+    def lidar_callback(self, data):
+        if not self.brick_found_:
+            return
+        # Synchronise lidar callback with image callback
+        with self.lidar_lock_:
+            if self.lidar_callback_ready_:
+                self.lidar_callback_ready_ = 0
+                
+                # if brick is not seen end the method early
+                brick_seen = False
+                for index in range(len(self.brick_cells_)):
+                    if self.brick_cells_[index]:
+                        brick_seen = True
+                        break
+                if not brick_seen:
+                    return
+
+                # Make local copy of brick_cells
+                brick_cells_ = self.brick_cells_
+            else:
+                return
+         # Access the range measurements
+        ranges = data.ranges
+        cam_ranges = list()
+
+        # Cam indices are relative to the bot e.g., 
+        # straight ahead is 0, anti-clockwise: 0, 359, 358...; clockwise: 0, 1, 2...
+        # Puts lidar distances per FOV segments
+        for index in range(325, 360):
+            cam_ranges.append(ranges[index])
+        for index in range(0, 35):
+            cam_ranges.append(ranges[index])
+
+        # Get Current position and view angle in map.
+        pose = self.get_pose_2d()
+
+        # Get Brick-World Coordinates and add them to a list
+        coordinates = []
+        all_points = []
+        print(f"x: {pose.x}")
+        print(f"y: {pose.y}")
+        print(f"theta: {pose.theta}")
+        for index in range(int(self.cam_fov)):
+            print(cam_ranges[index])
+            all_points.append(self.get_lidar_coordinate(pose, index, cam_ranges[index]))
+            if brick_cells_[index]:
+                coordinates.append(self.get_lidar_coordinate(pose, index, cam_ranges[index]))
+
+        
+
+        # Shrink coordinate list to remove LiDAR offset outliers
+        coordinates = self.snip_list(coordinates, 6)
+        # print(f"len coordinates = {len(coordinates)}")
+        # print("Coordinates:")
+        # for coordinate in coordinates:
+        #     print(coordinate)
+        
+        # Publish markers to RVIZ
+        self.publish_brick_marker(pose, coordinates)
+
+    # Given the current robot pose, cam index (angle) and distance value from LiDAR get the world coordinate of LiDAR hitting object
+    def get_lidar_coordinate(self, pose, index, dist):
+        angle = wrap_angle(pose.theta + math.radians(self.cam_fov/2.0) - math.radians(index))
+        print(pose.theta)
+        print(angle)
+        x = pose.x + dist*math.cos(angle)
+        y = pose.y + dist*math.sin(angle)
+
+        return (x, y)
+    
+    # Maintains a list of spaced world coordinates to create a rectangular marker for the brick
+    def publish_brick_marker(self, coordinates):
+        # Update point list
+        old_length_ = len(self.brick_coords_)
+        for index in range(len(coordinates)):
+            if len(self.brick_coords_) == 0:
+                self.brick_coords_.append(coordinates[index])
+            else:
+                skip = False
+                for existing_coordinate in self.brick_coords_:
+                    pair = [coordinates[index], existing_coordinate]
+                    if self.get_distance(pair) < self.brick_coord_radius_:
+                        skip = True
+                        break
+                if not skip:
+                    self.brick_coords_.append(coordinates[index])
+        
+        # Don't try to publish if no new coordinates added or too few points to make a marker
+        if old_length_ == len(self.brick_coords_) or len(self.brick_coords_) <= 1:
+            return
+        
+        best_pair = self.get_max_distance_coordinates(self.brick_coords_)
+        print(best_pair)
+
+        x, y = self.get_midpoint_coordinate(best_pair)
+        print(f"World Midpoint: {(x, y)}")
+
+        rotation = self.get_angle([(x, y), best_pair[0]])
+
+        x_scale, y_scale = self.get_axis_scales(best_pair)
+
+        marker = self.create_marker(x, y, x_scale, y_scale, rotation)
+
+        # points = [Marker(), Marker()]
+        # points[0].header.frame_id = "map"
+        # points[0].ns = "wally_brick"
+        # points[0].id = 1
+        # points[0].type = Marker.SPHERE
+        # points[0].action = Marker.ADD
+        # points[0].scale.x = 0.05
+        # points[0].scale.y = 0.05
+        # points[0].scale.z = 0.3
+        # points[0].color.a = 1.0
+        # points[0].color.r = 0.0
+        # points[0].color.g = 0.0
+        # points[0].color.b = 1.0
+        # points[0].pose.position.x = best_pair[0][0]
+        # points[0].pose.position.y = best_pair[0][1]
+        # points[0].pose.position.z = 0.0
+
+        # points[1].header.frame_id = "map"
+        # points[1].ns = "wally_brick"
+        # points[1].id = 2
+        # points[1].type = Marker.SPHERE
+        # points[1].action = Marker.ADD
+        # points[1].scale.x = 0.05
+        # points[1].scale.y = 0.05
+        # points[1].scale.z = 0.3
+        # points[1].color.a = 1.0
+        # points[1].color.r = 0.0
+        # points[1].color.g = 0.0
+        # points[1].color.b = 1.0
+        # points[1].pose.position.x = best_pair[1][0]
+        # points[1].pose.position.y = best_pair[1][1]
+        # points[1].pose.position.z = 0.0
+        # self.marker_pub.publish(points[0])
+        # self.marker_pub.publish(points[1])
+
+        self.marker_pub.publish(marker)
+
+    # Returns the mid-point between the Brick-World Coordinates furthest apart
+    def get_midpoint_coordinate(self, coordinates):
+        # Unpack tuple coordinates
+        x1, y1 = coordinates[0]
+        x2, y2 = coordinates[1]
+
+        return ((x1 + x2)/2, (y1 + y2)/2)
+
+    def get_max_distance_coordinates(self, coordinates):
+        max_distance = 0.0
+        coordinate_pair = []
+        for index_A in range(len(coordinates)):
+            for index_B in range(len(coordinates)):
+                pair = [coordinates[index_A], coordinates[index_B]]
+                distance = self.get_distance(pair)
+                if distance > max_distance:
+                    max_distance = distance
+                    coordinate_pair = pair
+        return coordinate_pair
+        
+    def get_distance(self, coordinates):
+        # Unpack tuple coordinates
+        x1, y1 = coordinates[0]
+        x2, y2 = coordinates[1]
+
+        return math.sqrt((x2-x1)**2.0 + (y2-y1)**2.0)
+    
+    def get_axis_scales(self, coordinates):
+        x_delta = coordinates[0][0] - coordinates[1][0]
+        y_delta = coordinates[0][1] - coordinates[1][1]
+
+        return (x_delta, y_delta)
+
+    def get_angle(self, coordinates):
+        x_delta = coordinates[0][0] - coordinates[1][0]
+        y_delta = coordinates[0][1] - coordinates[1][1]
+
+        return math.atan2(y_delta, x_delta)
+    
+    # Creates a basic red marker
+    def create_marker(self, x, y, x_scale, y_scale, rot):
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.ns = "wally_brick"
+        marker.id = 0
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.scale.x = x_scale
+        marker.scale.y = y_scale
+        marker.scale.z = 0.2
+        marker.color.a = 1.0
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.pose.position.x = x
+        marker.pose.position.y = y
+        marker.pose.position.z = 0.0
+        # Quaternion Rotation (Rotation around the Z-Axis to line up the marker)
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = math.sin(rot/2.0)
+        marker.pose.orientation.w = math.cos(rot/2.0)
+
+        return marker
+    
+    # Shrinks either side of list by value/2 amount
+    def snip_list(self, list, value):
+        if value % 2 != 0:
+            return
+
+        if len(list) <= value:
+            return []
+        else:
+            return list[int(value/2 - 1) : int(len(list) - 1 - value/2)]
+
 
     def send_goal_to_brick(self, brick_position):
         # Create a new goal message
