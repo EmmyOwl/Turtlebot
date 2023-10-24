@@ -25,9 +25,7 @@ from threading import Lock
 from visualization_msgs.msg import Marker
 from sensor_msgs.msg import LaserScan
 import os
-import tf2_ros
-import tf2_geometry_msgs
-from geometry_msgs.msg import PointStamped
+
 
 
 
@@ -55,7 +53,7 @@ def pose2d_to_pose(pose_2d):
 class BrickSearch:
     def __init__(self):
         # Variables/Flags
-        self.localised_ = False
+        self.localised_ = False  # You'll handle this logic yourself
         self.brick_found_ = False
         self.image_msg_count_ = 0
         self.lidar_callback_ready_ = 0
@@ -64,6 +62,10 @@ class BrickSearch:
         self.brick_cells_ = [False] * int(self.cam_fov)
         self.brick_coords_ = []
         self.brick_coord_radius_ = 0.01
+        self.brick_position = None
+        self.depth_callback_processed_ = False
+        self.lidar_callback_processed_ = False
+        self.rotation_required = 0.0
 
         # Convert map into a CV image
         self.cv_bridge_ = CvBridge()
@@ -79,17 +81,8 @@ class BrickSearch:
         while not rospy.is_shutdown() and not self.tf_listener_.canTransform("map", "base_link", rospy.Time(0.)):
             rospy.sleep(0.1)
 
-        # Subscribe to the LiDAR measurements
-        #self.lidar_sub_ = rospy.Subscriber("/scan", LaserScan, self.lidar_callback, queue_size=1)
-
-        # Advertise brick markers to RViZ
-        self.marker_pub = rospy.Publisher("visualization_marker", Marker, queue_size=1)
-
-        # Subscribe to depth camera
-        self.depth_sub_ = rospy.Subscriber("/camera/depth/image_raw", Image, self.depth_callback, queue_size=1)
-
         # Subscribe to the camera
-        self.image_sub_ = rospy.Subscriber("/camera/rgb/image_raw", Image, self.image_callback, callback_args='image_msg', queue_size=1)
+        self.image_sub_ = rospy.Subscriber("/camera/rgb/image_raw", Image, self.image_callback, queue_size=1)
 
         # Advertise "cmd_vel" publisher to control TurtleBot manually
         self.cmd_vel_pub_ = rospy.Publisher('cmd_vel', Twist, queue_size=1)
@@ -99,7 +92,9 @@ class BrickSearch:
         rospy.loginfo("Waiting for move_base action...")
         self.move_base_action_client_.wait_for_server()
         rospy.loginfo("move_base action available")
-        #self.marker_pub_ = rospy.Publisher('brick_marker', Marker, queue_size=10)
+
+        self.marker_pub_ = rospy.Publisher('brick_marker', Marker, queue_size=10)
+        self.depth_sub_ = rospy.Subscriber("/camera/depth/image_raw", Image, self.depth_callback, queue_size=1)
 
         self.laser_sub_ = rospy.Subscriber("/scan", LaserScan, self.laser_callback, queue_size=1)
         self.latest_scan_ = None
@@ -134,32 +129,30 @@ class BrickSearch:
             return None
 
 
-    def image_callback(self, image_msg, depth_msg):
+    def image_callback(self, image_msg):
         # Use this method to identify when the brick is visible
 
+        print("start image_callback")
+
         # The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
-        if self.image_msg_count_ < 15:
+        if self.image_msg_count_ < 2:
             self.image_msg_count_ += 1
             return
         else:
             self.image_msg_count_ = 0
 
-            if self.brick_found_:
-                with self.lidar_lock_:
-                    self.lidar_callback_ready_ = 1
-
         # Copy the image message to a cv_bridge image
         image = self.cv_bridge_.imgmsg_to_cv2(image_msg)
 
         # Convert to RGB format
+        full_image = cv.cvtColor(image, cv.COLOR_BGR2RGB)  # Store the full image
+
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
 
         # Reduce image height to 2%
         height, width, _ = image.shape
-
         top = int(height*0.49)
         bottom = int(height*0.51)
-
         image = image[top:bottom, :] # Slice image
 
         # Specify 'Red' Colour Range
@@ -171,9 +164,59 @@ class BrickSearch:
 
         red_present = cv.countNonZero(bit_mask) > 0
 
-        self.brick_found_ = red_present
+        if red_present:
+            self.brick_found_ = True
+            self.depth_callback_processed_ = False
+            self.lidar_callback_processed_ = False
 
-        if not self.brick_found_:
+            # Find the center of the brick
+            moments = cv.moments(bit_mask)
+            if moments["m00"] != 0:
+                brick_center_x = int(moments["m10"] / moments["m00"])
+            else:
+                brick_center_x = 0
+            
+            image_center_x = width // 2
+            self.rotation_required = (brick_center_x - image_center_x) * (self.cam_fov / width)
+
+            rospy.loginfo('image_callback')
+            rospy.loginfo('brick_found_: ' + str(self.brick_found_))
+
+            # Find contours in the bitmask
+            contours, _ = cv.findContours(bit_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+            
+            # Draw a bounding box around the largest contour
+            if contours:
+                # Assuming the largest contour corresponds to the brick
+                c = max(contours, key=cv.contourArea)
+                
+                # Get bounding rectangle
+                x, y, w, h = cv.boundingRect(c)
+                
+                # Adjust y for full-sized image
+                y = y + top  # Because we sliced the image from 'top' earlier
+                
+                # Add padding
+                padding = 5
+                x = max(0, x - padding)
+                y = max(0, y - padding)
+                w = w + 2 * padding
+                h = h + 2 * padding
+
+                # Draw the rectangle on the original full-sized image
+                cv.rectangle(full_image, (x, y), (x+w, y+h), (0, 0, 0), 4)  # Black rectangle
+
+            display_scale = 0.2
+            resized_image = cv.resize(full_image, (int(width * display_scale), int(height * display_scale)))
+
+            cv.imshow('Detected Brick', resized_image)
+            cv.waitKey(1)
+
+
+            with self.lidar_lock_:
+                self.lidar_callback_ready_ = 1
+        else:
+            self.brick_found_ = False
             self.brick_cells_ = [False] * int(self.cam_fov)
 
         with self.lidar_lock_:
@@ -202,20 +245,12 @@ class BrickSearch:
             except ValueError:
                 self.brick_cells_ = [False] * int(self.cam_fov)
 
-        # You can set "brick_found_" to true to signal to "mainLoop" that you have found a brick
-        # You may want to communicate more information
-        # Since the "image_callback" and "main_loop" methods can run at the same time you should protect any shared variables
-        # with a mutex
-        # "brick_found_" doesn't need a mutex because it's an atomic
-
-
-
-
-        rospy.loginfo('image_callback')
-        rospy.loginfo('brick_found_: ' + str(self.brick_found_))
+            if self.brick_position:  # Check if the brick's position has been updated
+                self.send_goal_to_brick(self.brick_position)
+                rospy.loginfo('Goal towards brick sent')
 
     def depth_callback(self, depth_msg):
-        if not self.brick_found_:
+        if not self.lidar_callback_ready_ or self.depth_callback_processed_:
             return
         # Synchronise lidar callback with image callback
         with self.lidar_lock_:
@@ -267,9 +302,12 @@ class BrickSearch:
 
         self.publish_brick_marker(coordinates)
 
+        self.depth_callback_processed_ = True
+        if self.lidar_callback_processed_:
+            self.lidar_callback_ready_ = 0
 
     def lidar_callback(self, data):
-        if not self.brick_found_:
+        if not self.lidar_callback_ready_ or self.lidar_callback_processed_:
             return
         # Synchronise lidar callback with image callback
         with self.lidar_lock_:
@@ -324,9 +362,10 @@ class BrickSearch:
         # print("Coordinates:")
         # for coordinate in coordinates:
         #     print(coordinate)
-        
-        # Publish markers to RVIZ
-        self.publish_brick_marker(pose, coordinates)
+
+        self.lidar_callback_processed_ = True
+        if self.depth_callback_processed_:
+            self.lidar_callback_ready_ = 0
 
     # Given the current robot pose, cam index (angle) and distance value from LiDAR get the world coordinate of LiDAR hitting object
     def get_lidar_coordinate(self, pose, index, dist):
@@ -337,7 +376,43 @@ class BrickSearch:
         y = pose.y + dist*math.sin(angle)
 
         return (x, y)
-    
+
+    def send_goal_to_brick(self, brick_position):
+        # Create a new goal message
+        goal = MoveBaseActionGoal()
+        goal.goal.target_pose.header.frame_id = "map"
+        goal.goal.target_pose.header.stamp = rospy.Time.now()
+        goal.goal.target_pose.pose.position.x = brick_position.x
+        goal.goal.target_pose.pose.position.y = brick_position.y
+        goal.goal.target_pose.pose.position.z = 0.0  # Keeping it on the ground
+        goal.goal.target_pose.pose.orientation.w = 1.0  # No rotation
+        
+        # Send the goal
+        self.move_base_action_client_.send_goal(goal.goal)
+
+    def get_pose_2d_cam(self):
+
+        # Lookup the latest transform
+        (trans,rot) = self.tf_listener_.lookupTransform('map', 'camera_link', rospy.Time(0))
+
+        print(trans)
+        print(rot)
+
+        # Return a Pose2D message
+        pose = Pose2D()
+        pose.x = trans[0]
+        pose.y = trans[1]
+
+        qw = rot[3];
+        qz = rot[2];
+
+        if qz >= 0.:
+            pose.theta = wrap_angle(2. * math.acos(qw))
+        else: 
+            pose.theta = wrap_angle(-2. * math.acos(qw));
+
+        return pose
+
     # Maintains a list of spaced world coordinates to create a rectangular marker for the brick
     def publish_brick_marker(self, coordinates):
         # Update point list
@@ -484,20 +559,6 @@ class BrickSearch:
             return list[int(value/2 - 1) : int(len(list) - 1 - value/2)]
 
 
-    def send_goal_to_brick(self, brick_position):
-        # Create a new goal message
-        goal = MoveBaseActionGoal()
-        goal.goal.target_pose.header.frame_id = "map"
-        goal.goal.target_pose.header.stamp = rospy.Time.now()
-        goal.goal.target_pose.pose.position.x = brick_position.x
-        goal.goal.target_pose.pose.position.y = brick_position.y
-        goal.goal.target_pose.pose.position.z = 0.0  # Keeping it on the ground
-        goal.goal.target_pose.pose.orientation.w = 1.0  # No rotation
-        
-        # Send the goal
-        self.move_base_action_client_.send_goal(goal.goal)
-
-
     def main_loop(self):
         rospy.loginfo('Starting exploration...')
         # Assume localized after 10 seconds
@@ -511,13 +572,13 @@ class BrickSearch:
                 rospy.loginfo('Brick reached. Stopping.')
                 break
             
-            if self.brick_found_:
-                rospy.loginfo('Brick found. Moving towards it.')
-                rospy.sleep(0.2)
-                continue
+            # If the robot is aligned with the brick (or close enough) and a brick position is known
+            if abs(self.rotation_required) < 5 and self.brick_position is not None:
+                self.send_goal_to_brick(self.brick_position)
+                self.brick_position = None  # Reset to ensure we don't keep sending goals
+                rospy.loginfo('Goal towards brick sent')
                 
             rospy.sleep(0.2)
-
 
 
 if __name__ == '__main__':

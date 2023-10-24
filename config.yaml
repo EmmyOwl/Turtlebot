@@ -1,4 +1,4 @@
-image: /home/emmy/catkin_ws/src/brick_search/config.pgm
+image: ar_group_project_2_map-all_unknown.pgm
 resolution: 0.050000
 origin: [-10.000000, -10.000000, 0.000000]
 negate: 0
