@@ -412,46 +412,14 @@ class BrickSearch:
         x, y = self.get_midpoint_coordinate(best_pair)
         print(f"World Midpoint: {(x, y)}")
 
-        rotation = self.get_angle([(x, y), best_pair[0]])
+        vertex = self.check_for_vertices(best_pair, self.brick_coords_)
 
-        x_scale, y_scale = self.get_axis_scales(best_pair)
+        rotation = self.get_angle(best_pair, vertex)
+        print(rotation)
+
+        x_scale, y_scale = self.get_axis_scales(best_pair, vertex)
 
         marker = self.create_marker(x, y, x_scale, y_scale, rotation)
-
-        # points = [Marker(), Marker()]
-        # points[0].header.frame_id = "map"
-        # points[0].ns = "wally_brick"
-        # points[0].id = 1
-        # points[0].type = Marker.SPHERE
-        # points[0].action = Marker.ADD
-        # points[0].scale.x = 0.05
-        # points[0].scale.y = 0.05
-        # points[0].scale.z = 0.3
-        # points[0].color.a = 1.0
-        # points[0].color.r = 0.0
-        # points[0].color.g = 0.0
-        # points[0].color.b = 1.0
-        # points[0].pose.position.x = best_pair[0][0]
-        # points[0].pose.position.y = best_pair[0][1]
-        # points[0].pose.position.z = 0.0
-
-        # points[1].header.frame_id = "map"
-        # points[1].ns = "wally_brick"
-        # points[1].id = 2
-        # points[1].type = Marker.SPHERE
-        # points[1].action = Marker.ADD
-        # points[1].scale.x = 0.05
-        # points[1].scale.y = 0.05
-        # points[1].scale.z = 0.3
-        # points[1].color.a = 1.0
-        # points[1].color.r = 0.0
-        # points[1].color.g = 0.0
-        # points[1].color.b = 1.0
-        # points[1].pose.position.x = best_pair[1][0]
-        # points[1].pose.position.y = best_pair[1][1]
-        # points[1].pose.position.z = 0.0
-        # self.marker_pub.publish(points[0])
-        # self.marker_pub.publish(points[1])
 
         self.marker_pub.publish(marker)
 
@@ -482,17 +450,55 @@ class BrickSearch:
 
         return math.sqrt((x2-x1)**2.0 + (y2-y1)**2.0)
     
-    def get_axis_scales(self, coordinates):
-        x_delta = coordinates[0][0] - coordinates[1][0]
-        y_delta = coordinates[0][1] - coordinates[1][1]
+    def get_axis_scales(self, coordinates, vertex):
+        if vertex is None:
+            x_delta = coordinates[0][0] - coordinates[1][0]
+            y_delta = coordinates[0][1] - coordinates[1][1]
+        else:
+            if self.get_distance((coordinates[0], vertex)) > self.get_distance((coordinates[1], vertex)):
+                x_delta = self.get_distance((coordinates[0], vertex))
+                y_delta = self.get_distance((coordinates[1], vertex))
+            else:
+                x_delta = self.get_distance((coordinates[1], vertex))
+                y_delta = self.get_distance((coordinates[0], vertex))
 
         return (x_delta, y_delta)
 
-    def get_angle(self, coordinates):
-        x_delta = coordinates[0][0] - coordinates[1][0]
-        y_delta = coordinates[0][1] - coordinates[1][1]
+    def get_angle(self, pair, vertex):
+        if vertex is not None:
+            if self.get_distance((pair[0], vertex)) > self.get_distance((pair[1], vertex)):
+                x_delta = pair[0][0] - vertex[0]
+                y_delta = pair[0][1] - vertex[1]
+            else:
+                x_delta = pair[1][0] - vertex[0]
+                y_delta = pair[1][1] - vertex[1]
+        else:
+            x_delta = pair[0][0] - pair[1][0]
+            y_delta = pair[0][1] - pair[1][1]
 
         return math.atan2(y_delta, x_delta)
+    
+    def check_for_vertices(self, pair, coordinates):
+        corner_point = None
+        best_angle = 0
+
+        for coordinate in coordinates:
+            if pair[0] == coordinate or pair[1] == coordinate:
+                continue
+
+            line_A = self.get_distance((pair[0], coordinate))
+            line_B = self.get_distance((pair[1], coordinate))
+            line_C = self.get_distance((pair[0], pair[1]))
+
+            angle = math.degrees(math.acos((line_A**2 + line_B**2 - line_C**2)/(2*line_A*line_B)))
+            print(angle)
+            if angle > 85.0 and angle < 115.0:
+                if abs(angle - 90) < abs(best_angle - 90):
+                    best_angle = angle
+                    corner_point = coordinate
+                
+        print(f"Corner: {corner_point}")
+        return corner_point
     
     # Creates a basic red marker
     def create_marker(self, x, y, x_scale, y_scale, rot):
