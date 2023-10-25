@@ -55,8 +55,8 @@ class BrickSearch:
         self.localised_ = False
         self.brick_found_ = False
         self.image_msg_count_ = 0
-        self.lidar_callback_ready_ = 0
-        self.lidar_lock_ = Lock()
+        self.depth_callback_ready_ = 0
+        self.depth_callback_lock_ = Lock()
         self.cam_fov = 100.0
         self.brick_cells_ = [False] * int(self.cam_fov)
         self.brick_coords_ = []
@@ -89,9 +89,6 @@ class BrickSearch:
 
         while not rospy.is_shutdown() and not self.tf_listener_cam_.canTransform("map", "camera_link", rospy.Time(0.)):
             rospy.sleep(0.1)
-
-        # Subscribe to the LiDAR measurements
-        #self.lidar_sub_ = rospy.Subscriber("/scan", LaserScan, self.lidar_callback, queue_size=1)
 
         # Advertise brick markers to RViZ
         self.marker_pub = rospy.Publisher("visualization_marker", Marker, queue_size=1)
@@ -192,8 +189,8 @@ class BrickSearch:
             self.image_msg_count_ = 0
 
             if self.brick_found_:
-                with self.lidar_lock_:
-                    self.lidar_callback_ready_ = 1
+                with self.depth_callback_lock_:
+                    self.depth_callback_ready_ = 1
 
         # Copy the image message to a cv_bridge image
         image = self.cv_bridge_.imgmsg_to_cv2(image_msg)
@@ -223,7 +220,7 @@ class BrickSearch:
         if not self.brick_found_:
             self.brick_cells_ = [False] * int(self.cam_fov)
 
-        with self.lidar_lock_:
+        with self.depth_callback_lock_:
             for index in range(int(self.cam_fov)):
                 # Divide the image into 100 segments (one segment per one degree of FOV)
                 left = index*int(width*(1.0/self.cam_fov))
@@ -238,11 +235,11 @@ class BrickSearch:
             
             # Remove potentially partially filled segments (first and last)
             # e.g., some brick is captured some environment is also captured.
-            # This ensures LiDAR measurement touches the brick and not the environment.
+            # This ensures Depth Cam measurement touches the brick and not the environment.
             
             try:
                 # Clear first and last FOV elements where brick is visible
-                # (Must be visible across three degrees to yield a result)
+                # (Must be visible across four degrees minimum to yield a marker placement)
                 for _ in range(2):
                     self.brick_cells_[self.brick_cells_.index(True)] = False
                     self.brick_cells_.reverse()
@@ -264,10 +261,10 @@ class BrickSearch:
     def depth_callback(self, depth_msg):
         if not self.brick_found_:
             return
-        # Synchronise lidar callback with image callback
-        with self.lidar_lock_:
-            if self.lidar_callback_ready_:
-                self.lidar_callback_ready_ = 0
+        # Synchronise Depth Cam callback with RGB Cam callback
+        with self.depth_callback_lock_:
+            if self.depth_callback_ready_:
+                self.depth_callback_ready_ = 0
                 
                 # if brick is not seen end the method early
                 brick_seen = False
@@ -288,16 +285,17 @@ class BrickSearch:
         depth = self.cv_bridge_.imgmsg_to_cv2(depth_msg)
         # Get cam distances
         height, width = depth.shape
-        depth = depth[int(height*0.5):int(height*0.5)+1, : ] # Slice depth image to single list
+        depth = depth[int(height*0.5):int(height*0.5)+1, : ] # Slice depth image to single list (Single pixel row)
         depth = depth[0]
 
+        # Keep a list of distances whose depth cam rays touch Wally
         valid_distances = []
 
         quotient = int(width/self.cam_fov)
         for index in range(int(self.cam_fov)):
             if brick_cells_[index]:
-                if depth[quotient*index] is np.nan:
-                    rospy.loginfo("Wally is too close!")
+                if depth[quotient*index] == np.nan:
+                    rospy.loginfo("Wally is too close!") # Caveat of the depth cam
                     return
                 valid_distances.append((index, depth[quotient*index]))
         
@@ -309,83 +307,21 @@ class BrickSearch:
         coordinates = []
 
         for index in range(len(valid_distances)):
-            coordinates.append(self.get_lidar_coordinate(cam_pose, valid_distances[index][0], valid_distances[index][1]))
-        print(coordinates)
+            coordinates.append(self.get_coordinate(cam_pose, valid_distances[index][0], valid_distances[index][1]))
 
         self.publish_brick_marker(coordinates)
 
 
-    def lidar_callback(self, data):
-        if not self.brick_found_:
-            return
-        # Synchronise lidar callback with image callback
-        with self.lidar_lock_:
-            if self.lidar_callback_ready_:
-                self.lidar_callback_ready_ = 0
-                
-                # if brick is not seen end the method early
-                brick_seen = False
-                for index in range(len(self.brick_cells_)):
-                    if self.brick_cells_[index]:
-                        brick_seen = True
-                        break
-                if not brick_seen:
-                    return
-
-                # Make local copy of brick_cells
-                brick_cells_ = self.brick_cells_
-            else:
-                return
-         # Access the range measurements
-        ranges = data.ranges
-        cam_ranges = list()
-
-        # Cam indices are relative to the bot e.g., 
-        # straight ahead is 0, anti-clockwise: 0, 359, 358...; clockwise: 0, 1, 2...
-        # Puts lidar distances per FOV segments
-        for index in range(325, 360):
-            cam_ranges.append(ranges[index])
-        for index in range(0, 35):
-            cam_ranges.append(ranges[index])
-
-        # Get Current position and view angle in map.
-        pose = self.get_pose_2d()
-
-        # Get Brick-World Coordinates and add them to a list
-        coordinates = []
-        all_points = []
-        print(f"x: {pose.x}")
-        print(f"y: {pose.y}")
-        print(f"theta: {pose.theta}")
-        for index in range(int(self.cam_fov)):
-            print(cam_ranges[index])
-            all_points.append(self.get_lidar_coordinate(pose, index, cam_ranges[index]))
-            if brick_cells_[index]:
-                coordinates.append(self.get_lidar_coordinate(pose, index, cam_ranges[index]))
-
+    # Given the current robot pose, cam index (angle) and distance value from Depth Cam get the world coordinate of Depth Cam distance ray hitting an object
+    def get_coordinate(self, pose, angle_offset, dist):
+        angle = wrap_angle(pose.theta + math.radians(self.cam_fov/2.0) - math.radians(angle_offset))
         
-
-        # Shrink coordinate list to remove LiDAR offset outliers
-        coordinates = self.snip_list(coordinates, 6)
-        # print(f"len coordinates = {len(coordinates)}")
-        # print("Coordinates:")
-        # for coordinate in coordinates:
-        #     print(coordinate)
-        
-        # Publish markers to RVIZ
-        self.publish_brick_marker(pose, coordinates)
-
-    # Given the current robot pose, cam index (angle) and distance value from LiDAR get the world coordinate of LiDAR hitting object
-    def get_lidar_coordinate(self, pose, index, dist):
-        angle = wrap_angle(pose.theta + math.radians(self.cam_fov/2.0) - math.radians(index))
-        print(pose.theta)
-        print(angle)
         x = pose.x + dist*math.cos(angle)
         y = pose.y + dist*math.sin(angle)
 
         return (x, y)
     
-    # Maintains a list of spaced world coordinates to create a rectangular marker for the brick
+    # Maintains a set list of spaced world coordinates to create a rectangular marker for the brick
     def publish_brick_marker(self, coordinates):
         # Update point list
         old_length_ = len(self.brick_coords_)
@@ -396,6 +332,7 @@ class BrickSearch:
                 skip = False
                 for existing_coordinate in self.brick_coords_:
                     pair = [coordinates[index], existing_coordinate]
+                    # Set new coordinates outside of radius to minimize cam measurement jitter
                     if self.get_distance(pair) < self.brick_coord_radius_:
                         skip = True
                         break
@@ -406,16 +343,15 @@ class BrickSearch:
         if old_length_ == len(self.brick_coords_) or len(self.brick_coords_) <= 1:
             return
         
+        # Gets either the straight line (one face of the brick) or the coordinates of the hypotenuse/diagonal of the brick
         best_pair = self.get_max_distance_coordinates(self.brick_coords_)
-        print(best_pair)
 
+        # Finds the midpoint of the diagonal a.k.a. the centroid
         x, y = self.get_midpoint_coordinate(best_pair)
-        print(f"World Midpoint: {(x, y)}")
 
         vertex = self.check_for_vertices(best_pair, self.brick_coords_)
 
         rotation = self.get_angle(best_pair, vertex)
-        print(rotation)
 
         x_scale, y_scale = self.get_axis_scales(best_pair, vertex)
 
@@ -423,14 +359,16 @@ class BrickSearch:
 
         self.marker_pub.publish(marker)
 
-    # Returns the mid-point between the Brick-World Coordinates furthest apart
+        rospy.loginfo(f"Placed marker at world point: {(x, y)}")
+
+    # Returns the world midpoint of two points
     def get_midpoint_coordinate(self, coordinates):
-        # Unpack tuple coordinates
         x1, y1 = coordinates[0]
         x2, y2 = coordinates[1]
 
         return ((x1 + x2)/2, (y1 + y2)/2)
 
+    # Find the pair of coordinates in a list whose distance between them is furthest apart
     def get_max_distance_coordinates(self, coordinates):
         max_distance = 0.0
         coordinate_pair = []
@@ -444,14 +382,15 @@ class BrickSearch:
         return coordinate_pair
         
     def get_distance(self, coordinates):
-        # Unpack tuple coordinates
         x1, y1 = coordinates[0]
         x2, y2 = coordinates[1]
 
         return math.sqrt((x2-x1)**2.0 + (y2-y1)**2.0)
     
+    # Gets marker scales from distance of straight line or distance from diagonal points to corner point
     def get_axis_scales(self, coordinates, vertex):
         if vertex is None:
+            # Can be thicker or thinner due to cam jitter
             x_delta = coordinates[0][0] - coordinates[1][0]
             y_delta = coordinates[0][1] - coordinates[1][1]
         else:
@@ -464,6 +403,7 @@ class BrickSearch:
 
         return (x_delta, y_delta)
 
+    # Gets the angle of rotation of the brick or straight line if no corner is present.
     def get_angle(self, pair, vertex):
         if vertex is not None:
             if self.get_distance((pair[0], vertex)) > self.get_distance((pair[1], vertex)):
@@ -478,11 +418,14 @@ class BrickSearch:
 
         return math.atan2(y_delta, x_delta)
     
+    # Tries to find if a point is a corner, given two ends of a line and another point:
+    # the internal angle becomes very close to 90 degrees i.e., oppposite the hypotenuse.
     def check_for_vertices(self, pair, coordinates):
         corner_point = None
         best_angle = 0
 
         for coordinate in coordinates:
+            # Don't use points that are the same as the current coordinates of the diagonal
             if pair[0] == coordinate or pair[1] == coordinate:
                 continue
 
@@ -491,16 +434,17 @@ class BrickSearch:
             line_C = self.get_distance((pair[0], pair[1]))
 
             angle = math.degrees(math.acos((line_A**2 + line_B**2 - line_C**2)/(2*line_A*line_B)))
-            print(angle)
+            
+            # Find angles relatively close to 90 degrees
             if angle > 85.0 and angle < 115.0:
+                # Set corner point whose angle is closest to 90 degrees
                 if abs(angle - 90) < abs(best_angle - 90):
                     best_angle = angle
                     corner_point = coordinate
                 
-        print(f"Corner: {corner_point}")
         return corner_point
     
-    # Creates a basic red marker
+    # Creates a basic 2D red marker
     def create_marker(self, x, y, x_scale, y_scale, rot):
         marker = Marker()
         marker.header.frame_id = "map"
@@ -525,16 +469,6 @@ class BrickSearch:
         marker.pose.orientation.w = math.cos(rot/2.0)
 
         return marker
-    
-    # Shrinks either side of list by value/2 amount
-    def snip_list(self, list, value):
-        if value % 2 != 0:
-            return
-
-        if len(list) <= value:
-            return []
-        else:
-            return list[int(value/2 - 1) : int(len(list) - 1 - value/2)]
 
     def main_loop(self):
 
