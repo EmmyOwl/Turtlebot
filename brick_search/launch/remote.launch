@@ -1,0 +1,9 @@
+<launch>
+  <arg name="model" default= "waffle"/>
+  <arg name="multi_robot_name" default=""/>
+
+  <include file="$(find brick_search)/launch/includes/description.launch.xml">
+    <arg name="model" value="$(arg model)" />
+  </include>
+  
+</launch>

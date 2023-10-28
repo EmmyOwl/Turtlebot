@@ -1,0 +1,42 @@
+<launch>
+
+  <!-- Load the navigation stack -->
+  <include file="$(find brick_search)/launch/navigation.launch" />
+  
+  <!-- Start the gmapping node -->
+  <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
+      <param name="base_frame" value="base_footprint"/>
+      <param name="odom_frame" value="odom"/>
+      <param name="map_update_interval" value="5.0"/>
+      <param name="maxUrange" value="6.0"/>
+
+  </node>
+
+<!-- 2. Run your brick_search.py node -->
+    <node name="brick_search_node" pkg="brick_search" type="brick_search.py" output="screen"/>
+    
+    
+  <!-- Start the explore_lite node -->
+  <node pkg="explore_lite" type="explore" name="explore" output="screen" respawn="true" respawn_delay="10">
+    <remap from="map" to="/map"/>
+    <remap from="cmd_vel" to="/cmd_vel"/>
+    <remap from="costmap" to="/move_base/global_costmap/costmap"/>
+ 
+    <!-- Explore parameters -->
+    <param name="robot_base_frame" value="base_link"/>
+    <param name="visualize" value="true"/>
+    <param name="min_frontier_size" value="0.4"/>
+    <param name="costmap_topic" value="map"/>
+    <param name="costmap_updates_topic" value="map_updates"/>
+    <param name="gain_scale" value="1.0"/>
+    <param name="orientation_scale" value="0.0"/>
+    <param name="potential_scale" value="10.0"/>
+    <param name="progress_timeout" value="30.0"/>
+    <param name="planner_frequency" value="10.0"/>
+    <param name="transform_tolerance" value="0.3"/>
+    <param name="log_level" value="WARN"/>
+
+  </node>
+
+</launch>
+
