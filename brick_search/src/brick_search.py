@@ -25,6 +25,7 @@ from threading import Lock
 from visualization_msgs.msg import Marker
 from sensor_msgs.msg import LaserScan
 import os
+from actionlib_msgs.msg import GoalID
 
 
 
@@ -65,6 +66,9 @@ class BrickSearch:
         self.brick_position = None
         self.depth_callback_processed_ = False
         self.rotation_required = 0.0
+        self.bot_moving_ = True
+        self.marker_placed_ = False
+        self.wally_centroid_ = None
 
         # Convert map into a CV image
         self.cv_bridge_ = CvBridge()
@@ -85,6 +89,12 @@ class BrickSearch:
 
         # Advertise "cmd_vel" publisher to control TurtleBot manually
         self.cmd_vel_pub_ = rospy.Publisher('cmd_vel', Twist, queue_size=1)
+
+        # Subscribe to movement data
+        self.move_sub_ = rospy.Subscriber("cmd_vel", Twist, self.moving_callback)
+
+        # Publisher to stop bot movement
+        self.cancel_move_pub_ = rospy.Publisher('/move_base/cancel', GoalID, queue_size=1)
 
         # Action client for move_base
         self.move_base_action_client_ = actionlib.SimpleActionClient('move_base', MoveBaseAction)
@@ -129,7 +139,12 @@ class BrickSearch:
         except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException, tf.Exception) as e:
             rospy.logerr("TF Error: %s", str(e))
             return None
+        
+    def moving_callback(self, vel_msg):
+        self.bot_moving_ = (vel_msg.linear.x != 0 or vel_msg.linear.y != 0 or vel_msg.angular.z != 0)
 
+    def stop_bot_movement(self):
+        self.cancel_move_pub_.publish(GoalID())
 
     def image_callback(self, image_msg):
         # Use this method to identify when the brick is visible
@@ -137,7 +152,7 @@ class BrickSearch:
         print("start image_callback")
 
         # The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
-        if self.image_msg_count_ < 15:
+        if self.image_msg_count_ < 5:
             self.image_msg_count_ += 1
             return
         else:
@@ -214,8 +229,14 @@ class BrickSearch:
             cv.waitKey(1)
 
 
+            # If the bot is not moving let a depth callback take place otherwise
+            # tell the bot to stop moving unless a marker has been placed (continue with goal).
             with self.depth_callback_lock_:
-                self.depth_callback_ready_ = 1
+                if not self.bot_moving_:
+                    self.depth_callback_ready_ = 1
+                else:
+                    if not self.marker_placed_:
+                        self.stop_bot_movement()
         else:
             self.brick_found_ = False
             self.brick_cells_ = [False] * int(self.cam_fov)
@@ -302,6 +323,7 @@ class BrickSearch:
             coordinates.append(self.get_coordinate(cam_pose, valid_distances[index][0], valid_distances[index][1]))
 
         self.publish_brick_marker(coordinates)
+        self.marker_placed_ = True
 
         self.depth_callback_processed_ = True
 
@@ -378,6 +400,8 @@ class BrickSearch:
 
         # Finds the midpoint of the diagonal a.k.a. the centroid
         x, y = self.get_midpoint_coordinate(best_pair)
+        
+        self.wally_centroid_ = (x, y)
 
         vertex = self.check_for_vertices(best_pair, self.brick_coords_)
 
