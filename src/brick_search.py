@@ -93,7 +93,7 @@ class BrickSearch:
         rospy.loginfo("move_base action available")
 
         # Advertise brick markers to RViZ
-        self.marker_pub_ = rospy.Publisher("visualization_marker", Marker, queue_size=1)
+        self.marker_pub_ = rospy.Publisher("/brick_marker", Marker, queue_size=1)
 
         # Subscribe to depth camera
         self.depth_sub_ = rospy.Subscriber("/camera/depth/image_raw", Image, self.depth_callback, queue_size=1)
@@ -137,7 +137,7 @@ class BrickSearch:
         print("start image_callback")
 
         # The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
-        if self.image_msg_count_ < 2:
+        if self.image_msg_count_ < 15:
             self.image_msg_count_ += 1
             return
         else:
@@ -214,13 +214,13 @@ class BrickSearch:
             cv.waitKey(1)
 
 
-            with self.lidar_lock_:
-                self.lidar_callback_ready_ = 1
+            with self.depth_callback_lock_:
+                self.depth_callback_ready_ = 1
         else:
             self.brick_found_ = False
             self.brick_cells_ = [False] * int(self.cam_fov)
 
-        with self.lidar_lock_:
+        with self.depth_callback_lock_:
             for index in range(int(self.cam_fov)):
                 # Divide the image into 100 segments (one segment per one degree of FOV)
                 left = index*int(width*(1.0/self.cam_fov))
